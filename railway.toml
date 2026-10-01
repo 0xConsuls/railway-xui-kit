@@ -1,0 +1,12 @@
+# Railway config-as-code. Networking (domain target port, TCP proxy) and
+# volumes cannot be declared here — set them in the dashboard (see README).
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+healthcheckPath = "/healthz"         # served by nginx, independent of the panel
+healthcheckTimeout = 120
+restartPolicyType = "ON_FAILURE"     # entrypoint exits non-zero if panel/nginx dies
+restartPolicyMaxRetries = 10

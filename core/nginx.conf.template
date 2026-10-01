@@ -1,0 +1,98 @@
+# =============================================================================
+# nginx.conf.template — rendered by core/nginx-gen.sh into /etc/nginx/nginx.conf
+#
+# Placeholders look like @@NAME@@ and are replaced verbatim. Everything that
+# depends on runtime state (panel path, subscription paths, inbound routes,
+# connection events) is generated; everything static lives here or in
+# /etc/nginx/snippets/proxy-common.conf.
+#
+# Do not edit the rendered file inside the container: the subscription
+# watcher regenerates it and would overwrite your change.
+# =============================================================================
+
+user nginx;              # Alpine package owns /var/lib/nginx with this user
+worker_processes @@WORKERS@@;
+pid /run/nginx.pid;
+error_log /dev/stderr warn;
+
+events {
+    worker_connections 4096;
+}
+
+http {
+    @@ACCESS_LOG@@
+    server_tokens off;
+
+    # xhttp "stream-up" mode sends one long, unbounded POST body. The default
+    # 1 MB limit would cut it off, so disable the limit globally.
+    client_max_body_size 0;
+
+    # Long-lived tunnels (ws / xhttp / httpupgrade). Without these nginx drops
+    # an idle tunnel after 60 s and the client reconnects constantly.
+    proxy_connect_timeout 60s;
+    proxy_send_timeout    3600s;
+    proxy_read_timeout    3600s;
+
+    # Send "Connection: upgrade" only for real WebSocket / HTTP-upgrade requests.
+    map $http_upgrade $connection_upgrade {
+        default upgrade;
+        ''      close;
+    }
+
+    # Railway terminates TLS at its edge, so $scheme is always "http" here.
+    # Trust the edge's X-Forwarded-Proto when present.
+    map $http_x_forwarded_proto $forwarded_proto {
+        default $http_x_forwarded_proto;
+        ''      $scheme;
+    }
+
+    # --- Real client IP ------------------------------------------------------
+    # Xray reads only the FIRST address of X-Forwarded-For. The chain that
+    # reaches us can contain several hops (Cloudflare, Railway edge, client) in
+    # varying order, so we rewrite the header to hold exactly one address.
+    #   * Custom domain behind Cloudflare -> CF-Connecting-IP is the client.
+    #   * Direct *.up.railway.app         -> first XFF entry is the client.
+    # Note: CF-Connecting-IP can be forged by a client that bypasses
+    # Cloudflare. It only feeds IP statistics / IP-limit, never auth.
+    map $http_x_forwarded_for $xff_first_ip {
+        "~^(?<first_ip>[^,[:space:]]+)" $first_ip;
+        default                          $remote_addr;
+    }
+    map $http_cf_connecting_ip $client_real_ip {
+        default $http_cf_connecting_ip;
+        ''      $xff_first_ip;
+    }
+
+    # Request path without query string (used by optional connection events).
+    map $request_uri $ev_path {
+        "~^(?<evp>[^?]*)" $evp;
+        default           "";
+    }
+    # Mirrored event sub-requests never need the request body.
+    mirror_request_body off;
+
+    server {
+@@LISTEN@@
+        # Railway terminates TLS, so nginx believes the request is plain http
+        # on port @@HTTP_PORT@@. Absolute redirects would therefore point to
+        # http://host:@@HTTP_PORT@@/... — relative redirects avoid that.
+        absolute_redirect off;
+
+        # Health check used by railway.toml (reserved path).
+        location = /healthz {
+            access_log off;
+            default_type text/plain;
+            return 200 "ok\n";
+        }
+
+@@EVENT_LOCATIONS@@
+        # ---- Panel ------------------------------------------------------------
+@@PANEL_LOCATIONS@@
+        # ---- Subscription server ---------------------------------------------
+@@SUB_LOCATIONS@@
+        # ---- Root ------------------------------------------------------------
+@@ROOT_LOCATION@@
+        # ---- Inbounds (path prefix -> internal port) --------------------------
+@@INBOUND_LOCATIONS@@
+    }
+}
